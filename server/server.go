@@ -17,7 +17,9 @@ type Server struct {
 
 // New builds a Server with config, collect state, and CSV writer. Call Run to start listening.
 func New(cfg *config.Config, state *datamanager.State, writer func(path string, rows []datamanager.Row) (int, error)) *Server {
-	engine := gin.Default()
+	gin.SetMode(gin.ReleaseMode) // 关闭 [GIN-debug] 启动信息
+	engine := gin.New()
+	engine.Use(gin.Recovery())
 	h := &handler.Handlers{
 		Cfg:    cfg,
 		State:  state,
@@ -40,6 +42,7 @@ func registerRoutes(r *gin.Engine, h *handler.Handlers) {
 	r.GET("/metrics/available", h.GetAvailableMetrics)
 	r.GET("/export/list", h.ExportList)
 	r.GET("/export", h.Export)
+	r.POST("/target/delete", h.CollectTargetDelete)
 }
 
 // Run starts the HTTP server and blocks. It returns when the server is stopped or errors.

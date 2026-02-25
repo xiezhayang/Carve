@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -38,19 +39,48 @@ func (h *Handlers) CollectStart(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "缺少或无效的 name/filename（仅允许字母数字、下划线、横线、点）"})
 		return
 	}
-	metrics := c.QueryArray("metric")
-	var list []string
-	for _, m := range metrics {
-		if m != "" {
-			list = append(list, m)
-		}
-	}
-	if err := h.State.StartCollect(name, filename, list); err != nil {
+	filter := parseFilterFromQuery(c)
+	if err := h.State.StartCollect(name, filename, filter); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": err.Error()})
+		log.Printf("[carve] CollectStart error=%v", err)
 		return
 	}
-	_ = os.MkdirAll(h.Cfg.CSVDir(), 0755)
+	if err := os.MkdirAll(h.Cfg.CSVDir(), 0755); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": err.Error()})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "message": "started", "name": name, "filename": filename})
+}
+
+func parseFilterFromQuery(c *gin.Context) datamanager.Filter {
+	f := datamanager.Filter{
+		Resource: make(map[string]string),
+		Attr:     make(map[string]string),
+	}
+	for k, v := range c.Request.URL.Query() {
+		if len(v) == 0 || v[0] == "" {
+			continue
+		}
+		switch {
+		case k == "metric":
+			f.Metrics = append(f.Metrics, v...)
+		case k == "scope":
+			f.ScopeName = v[0]
+		case strings.HasPrefix(k, "resource."):
+			f.Resource[strings.TrimPrefix(k, "resource.")] = v[0]
+		case strings.HasPrefix(k, "attr."):
+			f.Attr[strings.TrimPrefix(k, "attr.")] = v[0]
+		}
+	}
+	// 去空
+	var metrics []string
+	for _, m := range f.Metrics {
+		if strings.TrimSpace(m) != "" {
+			metrics = append(metrics, m)
+		}
+	}
+	f.Metrics = metrics
+	return f
 }
 
 func (h *Handlers) CollectStop(c *gin.Context) {
@@ -66,7 +96,7 @@ func (h *Handlers) CollectStatus(c *gin.Context) {
 		list = append(list, gin.H{
 			"name":       t.Name,
 			"filename":   filepath.Base(t.Path),
-			"filters":    t.Filters,
+			"filter":     t.Filter,
 			"collecting": t.Collecting,
 		})
 	}
@@ -85,10 +115,10 @@ func (h *Handlers) CollectFiltersGet(c *gin.Context) {
 	list := make([]gin.H, 0, len(targets))
 	for _, t := range targets {
 		list = append(list, gin.H{
-			"name":        t.Name,
-			"metrics":     t.Filters,
-			"collect_all": len(t.Filters) == 0,
-			"collecting":  t.Collecting,
+			"name":       t.Name,
+			"filename":   filepath.Base(t.Path),
+			"filter":     t.Filter,
+			"collecting": t.Collecting,
 		})
 	}
 	available := h.State.KnownMetrics()
@@ -105,7 +135,7 @@ func (h *Handlers) ExportList(c *gin.Context) {
 	if err == nil {
 		base, _ := filepath.Abs(dir)
 		for _, e := range entries {
-			if e.IsDir() || e.Name()[0] == '.' {
+			if e.IsDir() || (e.Name() != "" && e.Name()[0] == '.') {
 				continue
 			}
 			full := filepath.Join(dir, e.Name())
@@ -178,10 +208,12 @@ func (h *Handlers) V1Metrics(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "otlp: " + err.Error()})
 		return
 	}
+	parsed.DebugLogRawPayload(250, "load")
 	if names := parsed.MetricNames(); len(names) > 0 {
 		h.State.AddKnownMetrics(names)
 	}
 	targets := h.State.ActiveTargets()
+	log.Printf("[carve] V1Metrics targets=%d Writer==nil:%v", len(targets), h.Writer == nil)
 	if len(targets) == 0 {
 		c.JSON(http.StatusOK, gin.H{
 			"status":         "ok",
@@ -191,25 +223,41 @@ func (h *Handlers) V1Metrics(c *gin.Context) {
 			"processed_size": processedSize,
 			"compressed":     c.GetHeader("Content-Encoding") == "gzip",
 		})
+		log.Printf("[carve] V1Metrics no active targets")
 		return
 	}
 	var wg sync.WaitGroup
 	for _, t := range targets {
-		rows := parsed.RowsForFilter(t.Filters)
+		stats := &otlp.FilterFailureStats{}
+		rows := parsed.RowsForFilterWithStats(t.Filter, stats)
 		if h.Writer == nil || len(rows) == 0 {
+			if h.Writer == nil {
+				log.Printf("[carve] V1Metrics writer is nil")
+			}
+			if len(rows) == 0 {
+				if stats.ParsedRows == 0 {
+					log.Printf("[carve] V1Metrics rows empty target=%s path=%s (no rows in request, parsed_rows=0)", t.Name, t.Path)
+				} else {
+					log.Printf("[carve] V1Metrics rows empty target=%s path=%s parsed=%d failed_metric=%d failed_resource=%d failed_scope=%d failed_attr=%d",
+						t.Name, t.Path, stats.ParsedRows, stats.FailedMetric, stats.FailedResource, stats.FailedScope, stats.FailedAttr)
+				}
+			}
 			continue
 		}
-		conv := make([]datamanager.Row, len(rows))
-		for i := range rows {
-			conv[i] = datamanager.Row{TsMs: rows[i].TsMs, Metric: rows[i].Metric, Value: rows[i].Value, Service: rows[i].Service}
-		}
+		log.Printf("[carve] DEBUG_RESOURCE target=%s path=%s first_row_resource=%v", t.Name, t.Path, rows[0].Resource)
 		wg.Add(1)
 		go func(path string, r []datamanager.Row) {
 			defer wg.Done()
-			_, _ = h.Writer(path, r)
-		}(t.Path, conv)
+			_, err := h.Writer(path, r)
+			log.Printf("[carve] V1Metrics writer path=%s rows=%d err=%v", path, len(r), err)
+			if err != nil {
+				log.Printf("[carve] V1Metrics writer error=%v", err)
+			}
+		}(t.Path, rows)
 	}
+	log.Printf("[carve] V1Metrics targets=%d,waiting", len(targets))
 	wg.Wait()
+	log.Printf("[carve] V1Metrics targets=%d,waiting done", len(targets))
 	c.JSON(http.StatusOK, gin.H{
 		"status":          "ok",
 		"message":         "数据已接收",
@@ -219,4 +267,15 @@ func (h *Handlers) V1Metrics(c *gin.Context) {
 		"compressed":      c.GetHeader("Content-Encoding") == "gzip",
 		"targets_written": len(targets),
 	})
+}
+
+// CollectTargetDelete 删除指定 name 的 target（query: name=）。name 为空则删除全部。
+func (h *Handlers) CollectTargetDelete(c *gin.Context) {
+	name := strings.TrimSpace(c.Query("name"))
+	existed := h.State.DeleteTarget(name)
+	if name != "" && !existed {
+		c.JSON(http.StatusNotFound, gin.H{"status": "error", "message": "target not found: " + name})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "message": "deleted"})
 }

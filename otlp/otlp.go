@@ -1,10 +1,8 @@
-// Package otlp parses OTLP JSON metrics using the OpenTelemetry Collector pdata
-// model, so all OTLP fields (resource, scope, metric name/unit/description,
-// data point attributes) are available for filtering. Currently we filter by
-// metric name substring and output Gauge/Sum number data points as CSV rows.
 package otlp
 
 import (
+	"log"
+	"sort"
 	"strings"
 
 	"github.com/xiezhayang/Carve/datamanager"
@@ -13,13 +11,29 @@ import (
 	"go.opentelemetry.io/collector/pdata/pmetric/pmetricotlp"
 )
 
-// Parsed 表示一次 OTLP 解析结果；Parse 时一次遍历同时得到指标名和全部 rows
+// Parsed 表示一次 OTLP 解析结果
 type Parsed struct {
-	names   []string          // 本 payload 出现的指标名（去重）
-	allRows []datamanager.Row // 本 payload 所有 Gauge/Sum 的 rows，未按 filter 筛
+	names   []string
+	allRows []datamanager.Row
 }
 
-// Parse 解析 OTLP JSON，一次遍历同时：收集指标名 + 把所有 Gauge/Sum 转成 Row
+type FilterFailureStats struct {
+	ParsedRows     int
+	FailedMetric   int
+	FailedResource int
+	FailedScope    int
+	FailedAttr     int
+}
+
+func attrsToMap(m pcommon.Map) map[string]string {
+	out := make(map[string]string)
+	m.Range(func(k string, v pcommon.Value) bool {
+		out[k] = v.AsString()
+		return true
+	})
+	return out
+}
+
 func Parse(raw []byte) (*Parsed, error) {
 	req := pmetricotlp.NewExportRequest()
 	if err := req.UnmarshalJSON(raw); err != nil {
@@ -30,9 +44,10 @@ func Parse(raw []byte) (*Parsed, error) {
 	var allRows []datamanager.Row
 	for i := 0; i < md.ResourceMetrics().Len(); i++ {
 		rm := md.ResourceMetrics().At(i)
-		service := getServiceName(rm.Resource().Attributes())
+		resource := attrsToMap(rm.Resource().Attributes())
 		for j := 0; j < rm.ScopeMetrics().Len(); j++ {
 			sm := rm.ScopeMetrics().At(j)
+			scopeName := sm.Scope().Name()
 			for k := 0; k < sm.Metrics().Len(); k++ {
 				m := sm.Metrics().At(k)
 				name := m.Name()
@@ -43,12 +58,16 @@ func Parse(raw []byte) (*Parsed, error) {
 				case pmetric.MetricTypeGauge:
 					dps := m.Gauge().DataPoints()
 					for l := 0; l < dps.Len(); l++ {
-						allRows = append(allRows, numberDPToRow(dps.At(l), name, service))
+						dp := dps.At(l)
+						attr := attrsToMap(dp.Attributes())
+						allRows = append(allRows, numberDPToRow(dp, name, resource, scopeName, attr))
 					}
 				case pmetric.MetricTypeSum:
 					dps := m.Sum().DataPoints()
 					for l := 0; l < dps.Len(); l++ {
-						allRows = append(allRows, numberDPToRow(dps.At(l), name, service))
+						dp := dps.At(l)
+						attr := attrsToMap(dp.Attributes())
+						allRows = append(allRows, numberDPToRow(dp, name, resource, scopeName, attr))
 					}
 				}
 			}
@@ -61,48 +80,82 @@ func Parse(raw []byte) (*Parsed, error) {
 	return &Parsed{names: names, allRows: allRows}, nil
 }
 
-// MetricNames 返回本 payload 里出现的所有指标名（供更新「可选用指标」）
 func (p *Parsed) MetricNames() []string {
 	return p.names
 }
 
-// RowsForFilter 按 allowList 在已缓存的 allRows 上做子串过滤，得到要收集的 rows
-func (p *Parsed) RowsForFilter(allowList []string) []datamanager.Row {
-	if len(p.allRows) == 0 {
-		return nil
-	}
-	if len(allowList) == 0 {
-		return p.allRows
-	}
-	out := make([]datamanager.Row, 0)
-	for _, r := range p.allRows {
-		if metricAllowed(r.Metric, allowList) {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
-func getServiceName(attrs pcommon.Map) string {
-	if v, ok := attrs.Get("service.name"); ok {
-		return v.Str()
-	}
-	return ""
-}
-
-func metricAllowed(name string, allowList []string) bool {
-	if len(allowList) == 0 {
+func metricMatch(name string, list []string) bool {
+	if len(list) == 0 {
 		return true
 	}
-	for _, sub := range allowList {
-		if sub != "" && strings.Contains(name, sub) {
+	for _, s := range list {
+		if s != "" && strings.Contains(name, s) {
 			return true
 		}
 	}
 	return false
 }
 
-func numberDPToRow(dp pmetric.NumberDataPoint, name, service string) datamanager.Row {
+func resourceMatch(rowRes, filterRes map[string]string) bool {
+	for k, v := range filterRes {
+		if rowRes[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+func attrMatch(rowAttr, filterAttr map[string]string) bool {
+	for k, v := range filterAttr {
+		if rowAttr[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+func (p *Parsed) RowsForFilterWithStats(f datamanager.Filter, stats *FilterFailureStats) []datamanager.Row {
+	if len(p.allRows) == 0 {
+		if stats != nil {
+			stats.ParsedRows = 0
+		}
+		return nil
+	}
+	if stats != nil {
+		stats.ParsedRows = len(p.allRows)
+	}
+	out := make([]datamanager.Row, 0)
+	for _, r := range p.allRows {
+		if !metricMatch(r.Metric, f.Metrics) {
+			if stats != nil {
+				stats.FailedMetric++
+			}
+			continue
+		}
+		if !resourceMatch(r.Resource, f.Resource) {
+			if stats != nil {
+				stats.FailedResource++
+			}
+			continue
+		}
+		if f.ScopeName != "" && !strings.Contains(r.ScopeName, f.ScopeName) {
+			if stats != nil {
+				stats.FailedScope++
+			}
+			continue
+		}
+		if !attrMatch(r.Attr, f.Attr) {
+			if stats != nil {
+				stats.FailedAttr++
+			}
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+func numberDPToRow(dp pmetric.NumberDataPoint, name string, resource map[string]string, scopeName string, attr map[string]string) datamanager.Row {
 	tsNano := dp.Timestamp()
 	tsMs := int64(tsNano) / 1_000_000
 	var value float64
@@ -113,9 +166,49 @@ func numberDPToRow(dp pmetric.NumberDataPoint, name, service string) datamanager
 		value = float64(dp.IntValue())
 	}
 	return datamanager.Row{
-		TsMs:    tsMs,
-		Metric:  name,
-		Value:   value,
-		Service: service,
+		TsMs:      tsMs,
+		Metric:    name,
+		Value:     value,
+		Resource:  resource,
+		ScopeName: scopeName,
+		Attr:      attr,
+	}
+}
+
+// DebugLogRawPayload 用本次请求解析出的原始数据（未过滤）打调试日志：
+// 1) 本 payload 里出现过的所有 resource 键名；
+// 2) 最多 sampleRows 条完整行（ts, metric, value, scope, resource, attr），仅打印指标名包含 metricSubstr 的行（metricSubstr 为空则取前 sampleRows 条）。
+// 便于确认有哪些 resource/scope/attr 可用于过滤，以及 CPU load 等条目的完整内容。
+func (p *Parsed) DebugLogRawPayload(sampleRows int, metricSubstr string) {
+	if len(p.allRows) == 0 {
+		log.Printf("[carve] DEBUG_RAW parsed_rows=0 (no data)")
+		return
+	}
+	resourceKeys := make(map[string]struct{})
+	for _, r := range p.allRows {
+		for k := range r.Resource {
+			resourceKeys[k] = struct{}{}
+		}
+	}
+	keys := make([]string, 0, len(resourceKeys))
+	for k := range resourceKeys {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	log.Printf("[carve] DEBUG_RAW parsed_rows=%d resource_keys_seen=%v", len(p.allRows), keys)
+	count := 0
+	for _, r := range p.allRows {
+		if count >= sampleRows {
+			break
+		}
+		if metricSubstr != "" && !strings.Contains(r.Metric, metricSubstr) {
+			continue
+		}
+		count++
+		log.Printf("[carve] DEBUG_RAW row #%d ts=%d metric=%s value=%v scope=%s resource=%v attr=%v",
+			count, r.TsMs, r.Metric, r.Value, r.ScopeName, r.Resource, r.Attr)
+	}
+	if count == 0 && metricSubstr != "" {
+		log.Printf("[carve] DEBUG_RAW no row with metric containing %q in this payload", metricSubstr)
 	}
 }

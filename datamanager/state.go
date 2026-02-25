@@ -2,6 +2,7 @@ package datamanager
 
 import (
 	"fmt"
+	"maps"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -10,10 +11,19 @@ import (
 var ErrInvalidFilename = fmt.Errorf("invalid filename")
 
 // Target 表示一路收集：独立 filter + 一个 CSV 文件；Collecting 表示当前是否在收
+// Filter 按 OTLP 层级：Metrics 子串 OR，Resource/Attr 全匹配 AND，ScopeName 子串
+type Filter struct {
+	Metrics   []string
+	Resource  map[string]string
+	ScopeName string
+	Attr      map[string]string
+}
+
+// Target 表示一路收集：Filter + 一个 CSV 文件
 type Target struct {
 	Name       string
 	Filename   string
-	Filters    []string
+	Filter     Filter
 	Collecting bool
 }
 
@@ -21,7 +31,7 @@ type Target struct {
 type TargetInfo struct {
 	Name       string
 	Path       string
-	Filters    []string
+	Filter     Filter
 	Collecting bool
 }
 
@@ -32,23 +42,12 @@ type State struct {
 	knownMetrics map[string]struct{} // 从 OTLP 里发现过的指标名，供用户选择
 }
 
-func NewState(csvDir string, initialFilters []string) *State {
-	s := &State{
+func NewState(csvDir string) *State {
+	return &State{
 		csvDir:       csvDir,
 		targets:      make(map[string]*Target),
 		knownMetrics: make(map[string]struct{}),
 	}
-	if len(initialFilters) > 0 {
-		filters := make([]string, len(initialFilters))
-		copy(filters, initialFilters)
-		s.targets["default"] = &Target{
-			Name:       "default",
-			Filename:   "default.csv",
-			Filters:    filters,
-			Collecting: false,
-		}
-	}
-	return s
 }
 
 func SafeFilename(name string) bool {
@@ -65,21 +64,33 @@ func SafeFilename(name string) bool {
 	return true
 }
 
-func (s *State) StartCollect(name, filename string, filters []string) error {
+func copyFilter(f Filter) Filter {
+	out := Filter{
+		Metrics:   make([]string, len(f.Metrics)),
+		ScopeName: f.ScopeName,
+		Resource:  make(map[string]string),
+		Attr:      make(map[string]string),
+	}
+	copy(out.Metrics, f.Metrics)
+	maps.Copy(out.Resource, f.Resource)
+	maps.Copy(out.Attr, f.Attr)
+	return out
+}
+
+func (s *State) StartCollect(name, filename string, filter Filter) error {
 	name = strings.TrimSpace(name)
 	if name == "" || !SafeFilename(name) || !SafeFilename(filename) {
 		return ErrInvalidFilename
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	fcopy := make([]string, len(filters))
-	copy(fcopy, filters)
+	fcopy := copyFilter(filter)
 	if t, ok := s.targets[name]; ok {
 		t.Filename = filename
-		t.Filters = fcopy
+		t.Filter = fcopy
 		t.Collecting = true
 	} else {
-		s.targets[name] = &Target{Name: name, Filename: filename, Filters: fcopy, Collecting: true}
+		s.targets[name] = &Target{Name: name, Filename: filename, Filter: fcopy, Collecting: true}
 	}
 	return nil
 }
@@ -127,13 +138,11 @@ func (s *State) ActiveTargets() []TargetInfo {
 		if !t.Collecting {
 			continue
 		}
-		fcopy := make([]string, len(t.Filters))
-		copy(fcopy, t.Filters)
 		out = append(out, TargetInfo{
 			Name:       t.Name,
 			Path:       filepath.Join(s.csvDir, t.Filename),
-			Filters:    fcopy,
-			Collecting: true,
+			Filter:     copyFilter(t.Filter),
+			Collecting: t.Collecting,
 		})
 	}
 	return out
@@ -145,12 +154,10 @@ func (s *State) AllTargets() []TargetInfo {
 	defer s.mu.RUnlock()
 	out := make([]TargetInfo, 0, len(s.targets))
 	for _, t := range s.targets {
-		fcopy := make([]string, len(t.Filters))
-		copy(fcopy, t.Filters)
 		out = append(out, TargetInfo{
 			Name:       t.Name,
 			Path:       filepath.Join(s.csvDir, t.Filename),
-			Filters:    fcopy,
+			Filter:     copyFilter(t.Filter),
 			Collecting: t.Collecting,
 		})
 	}
@@ -189,4 +196,21 @@ func (s *State) KnownMetrics() []string {
 		}
 	}
 	return out
+}
+
+// DeleteTarget 从 state 中移除指定 name 的 target。name 为空则删除全部。
+// 返回被删除的 target 是否曾存在（用于 404）。
+func (s *State) DeleteTarget(name string) (existed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if name == "" {
+		existed = len(s.targets) > 0
+		s.targets = make(map[string]*Target)
+		return existed
+	}
+	if _, ok := s.targets[name]; ok {
+		delete(s.targets, name)
+		return true
+	}
+	return false
 }
