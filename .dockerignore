@@ -1,0 +1,6 @@
+.git
+*.md
+python
+deploy
+*.py
+.env

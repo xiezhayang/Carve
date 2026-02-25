@@ -1,0 +1,29 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../../rua/opentelemetry-demo"
+		},
+		{
+			"path": "../../rua/opentelemetry-collector"
+		},
+		{
+			"path": "../../rua/opentelemetry-collector-contrib"
+		},
+		{
+			"path": "../Omar"
+		},
+		{
+			"path": "../../rua/opentelemetry-proto"
+		},
+		{
+			"path": "../../prometheus"
+		},
+		{
+			"path": "../../rua/opentelemetry-go"
+		}
+	],
+	"settings": {}
+}

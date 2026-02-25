@@ -1,0 +1,192 @@
+package datamanager
+
+import (
+	"fmt"
+	"path/filepath"
+	"strings"
+	"sync"
+)
+
+var ErrInvalidFilename = fmt.Errorf("invalid filename")
+
+// Target 表示一路收集：独立 filter + 一个 CSV 文件；Collecting 表示当前是否在收
+type Target struct {
+	Name       string
+	Filename   string
+	Filters    []string
+	Collecting bool
+}
+
+// TargetInfo 返回给调用方，Path 已拼好
+type TargetInfo struct {
+	Name       string
+	Path       string
+	Filters    []string
+	Collecting bool
+}
+
+type State struct {
+	mu           sync.RWMutex
+	targets      map[string]*Target
+	csvDir       string
+	knownMetrics map[string]struct{} // 从 OTLP 里发现过的指标名，供用户选择
+}
+
+func NewState(csvDir string, initialFilters []string) *State {
+	s := &State{
+		csvDir:       csvDir,
+		targets:      make(map[string]*Target),
+		knownMetrics: make(map[string]struct{}),
+	}
+	if len(initialFilters) > 0 {
+		filters := make([]string, len(initialFilters))
+		copy(filters, initialFilters)
+		s.targets["default"] = &Target{
+			Name:       "default",
+			Filename:   "default.csv",
+			Filters:    filters,
+			Collecting: false,
+		}
+	}
+	return s
+}
+
+func SafeFilename(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" || len(name) > 200 || strings.Contains(name, "..") ||
+		strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		return false
+	}
+	for _, c := range name {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.') {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *State) StartCollect(name, filename string, filters []string) error {
+	name = strings.TrimSpace(name)
+	if name == "" || !SafeFilename(name) || !SafeFilename(filename) {
+		return ErrInvalidFilename
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fcopy := make([]string, len(filters))
+	copy(fcopy, filters)
+	if t, ok := s.targets[name]; ok {
+		t.Filename = filename
+		t.Filters = fcopy
+		t.Collecting = true
+	} else {
+		s.targets[name] = &Target{Name: name, Filename: filename, Filters: fcopy, Collecting: true}
+	}
+	return nil
+}
+
+func (s *State) StopCollect(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if name == "" {
+		for _, t := range s.targets {
+			t.Collecting = false
+		}
+		return
+	}
+	if t, ok := s.targets[name]; ok {
+		t.Collecting = false
+	}
+}
+
+// Collecting 返回当前是否有在收集的路，以及简要描述（如 "2 targets: a, b"）
+func (s *State) Collecting() (bool, string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var names []string
+	for name, t := range s.targets {
+		if t.Collecting {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return false, ""
+	}
+	summary := strings.Join(names, ", ")
+	if len(names) > 1 {
+		summary = fmt.Sprintf("%d targets: %s", len(names), summary)
+	}
+	return true, summary
+}
+
+// ActiveTargets 只返回当前 Collecting==true 的路，用于写文件
+func (s *State) ActiveTargets() []TargetInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []TargetInfo
+	for _, t := range s.targets {
+		if !t.Collecting {
+			continue
+		}
+		fcopy := make([]string, len(t.Filters))
+		copy(fcopy, t.Filters)
+		out = append(out, TargetInfo{
+			Name:       t.Name,
+			Path:       filepath.Join(s.csvDir, t.Filename),
+			Filters:    fcopy,
+			Collecting: true,
+		})
+	}
+	return out
+}
+
+// AllTargets 返回所有已定义的路（含未在收集的），用于状态展示
+func (s *State) AllTargets() []TargetInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]TargetInfo, 0, len(s.targets))
+	for _, t := range s.targets {
+		fcopy := make([]string, len(t.Filters))
+		copy(fcopy, t.Filters)
+		out = append(out, TargetInfo{
+			Name:       t.Name,
+			Path:       filepath.Join(s.csvDir, t.Filename),
+			Filters:    fcopy,
+			Collecting: t.Collecting,
+		})
+	}
+	return out
+}
+
+// AddKnownMetrics 把本次 OTLP 解析出的指标名并入已知列表（/v1/metrics 成功后调用）
+func (s *State) AddKnownMetrics(names []string) {
+	if len(names) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, n := range names {
+		if n != "" {
+			s.knownMetrics[n] = struct{}{}
+		}
+	}
+}
+
+// KnownMetrics 返回当前已知的指标名列表（已排序），供用户选择要收集哪些
+func (s *State) KnownMetrics() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]string, 0, len(s.knownMetrics))
+	for n := range s.knownMetrics {
+		out = append(out, n)
+	}
+	// 排序，便于前端展示
+	// 用 strings 比较即可
+	for i := 0; i < len(out); i++ {
+		for j := i + 1; j < len(out); j++ {
+			if out[j] < out[i] {
+				out[i], out[j] = out[j], out[i]
+			}
+		}
+	}
+	return out
+}

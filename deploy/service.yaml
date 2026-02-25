@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: otlp-server
+  labels:
+    app: otlp-server
+    component: http-receiver
+spec:
+  selector:
+    app: otlp-server
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  type: ClusterIP 

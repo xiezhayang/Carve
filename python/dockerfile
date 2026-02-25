@@ -1,0 +1,33 @@
+# 使用Alpine镜像减少体积，Python 3.11兼容性好
+FROM python:3.11-alpine
+
+# 设置工作目录
+WORKDIR /app
+
+# 安装必要的系统包（如果需要）
+# RUN apk add --no-cache curl
+
+# 复制应用代码
+COPY server.py .
+
+# 创建日志目录并设置权限
+RUN mkdir -p /var/log && \
+    chmod 755 /var/log
+
+# 创建非root用户运行（安全最佳实践）
+RUN addgroup -g 1001 -S appuser && \
+    adduser -u 1001 -S appuser -G appuser && \
+    chown -R appuser:appuser /app /var/log
+
+# 切换到非root用户
+USER appuser
+
+# 暴露端口（可通过环境变量覆盖）
+EXPOSE 8080
+
+# 健康检查（使用/healthz端点）
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')"
+
+# 启动命令
+CMD ["python", "server.py"]
