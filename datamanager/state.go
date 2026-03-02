@@ -1,9 +1,12 @@
 package datamanager
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
+	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -19,34 +22,31 @@ type Filter struct {
 	Attr      map[string]string
 }
 
-// Target 表示一路收集：Filter + 一个 CSV 文件
+// Target 表示一路收集：Filter + 一个 CSV 文件；Path 由 AllTargets/ActiveTargets 填充，不持久化
 type Target struct {
 	Name       string
 	Filename   string
-	Filter     Filter
-	Collecting bool
-}
-
-// TargetInfo 返回给调用方，Path 已拼好
-type TargetInfo struct {
-	Name       string
-	Path       string
+	Path       string `json:"-"` // 仅返回用，不参与 JSON 持久化
 	Filter     Filter
 	Collecting bool
 }
 
 type State struct {
-	mu           sync.RWMutex
-	targets      map[string]*Target
-	csvDir       string
-	knownMetrics map[string]struct{} // 从 OTLP 里发现过的指标名，供用户选择
+	mu                sync.RWMutex
+	targets           map[string]*Target
+	csvDir            string
+	stateFilePath     string
+	knownMetrics      map[string]struct{} // 从 OTLP 里发现过的指标名，供用户选择
+	knownResourceKeys map[string]struct{} // 从 OTLP 里发现过的 resource key，供用户选择
 }
 
 func NewState(csvDir string) *State {
 	return &State{
-		csvDir:       csvDir,
-		targets:      make(map[string]*Target),
-		knownMetrics: make(map[string]struct{}),
+		csvDir:            csvDir,
+		stateFilePath:     filepath.Join(csvDir, "state.json"),
+		targets:           make(map[string]*Target),
+		knownMetrics:      make(map[string]struct{}),
+		knownResourceKeys: make(map[string]struct{}),
 	}
 }
 
@@ -130,16 +130,17 @@ func (s *State) Collecting() (bool, string) {
 }
 
 // ActiveTargets 只返回当前 Collecting==true 的路，用于写文件
-func (s *State) ActiveTargets() []TargetInfo {
+func (s *State) ActiveTargets() []Target {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	var out []TargetInfo
+	var out []Target
 	for _, t := range s.targets {
 		if !t.Collecting {
 			continue
 		}
-		out = append(out, TargetInfo{
+		out = append(out, Target{
 			Name:       t.Name,
+			Filename:   t.Filename,
 			Path:       filepath.Join(s.csvDir, t.Filename),
 			Filter:     copyFilter(t.Filter),
 			Collecting: t.Collecting,
@@ -149,13 +150,14 @@ func (s *State) ActiveTargets() []TargetInfo {
 }
 
 // AllTargets 返回所有已定义的路（含未在收集的），用于状态展示
-func (s *State) AllTargets() []TargetInfo {
+func (s *State) AllTargets() []Target {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]TargetInfo, 0, len(s.targets))
+	out := make([]Target, 0, len(s.targets))
 	for _, t := range s.targets {
-		out = append(out, TargetInfo{
+		out = append(out, Target{
 			Name:       t.Name,
+			Filename:   t.Filename,
 			Path:       filepath.Join(s.csvDir, t.Filename),
 			Filter:     copyFilter(t.Filter),
 			Collecting: t.Collecting,
@@ -213,4 +215,149 @@ func (s *State) DeleteTarget(name string) (existed bool) {
 		return true
 	}
 	return false
+}
+
+// AddKnownResourceKeys 把本次 OTLP 里出现的 resource 键名并入已知列表
+func (s *State) AddKnownResourceKeys(keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, k := range keys {
+		if k != "" {
+			s.knownResourceKeys[k] = struct{}{}
+		}
+	}
+}
+
+// KnownResourceKeys 返回当前已知的 resource 键名列表（已排序），供用户选择过滤维度
+func (s *State) KnownResourceKeys() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]string, 0, len(s.knownResourceKeys))
+	for k := range s.knownResourceKeys {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// LoadTargets 从 stateFilePath 恢复 target；文件不存在则扫描 csvDir 下已有 .csv 生成占位 target 并落盘。
+func (s *State) LoadTargets() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, err := os.ReadFile(s.stateFilePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			s.loadTargetsFromCSVDir()
+			return nil
+		}
+		return err
+	}
+	var list []Target
+	if err := json.Unmarshal(data, &list); err != nil {
+		return err
+	}
+	s.targets = make(map[string]*Target)
+	for i := range list {
+		t := &list[i]
+		if t.Name == "" || !SafeFilename(t.Name) || !SafeFilename(t.Filename) {
+			continue
+		}
+		if t.Filter.Resource == nil {
+			t.Filter.Resource = make(map[string]string)
+		}
+		if t.Filter.Attr == nil {
+			t.Filter.Attr = make(map[string]string)
+		}
+		s.targets[t.Name] = &Target{
+			Name:       t.Name,
+			Filename:   t.Filename,
+			Filter:     copyFilter(t.Filter),
+			Collecting: false,
+		}
+	}
+	for _, t := range s.targets {
+		if !filterEmpty(t.Filter) {
+			continue
+		}
+		full := filepath.Join(s.csvDir, t.Filename)
+		if _, err := os.Stat(full); err != nil {
+			continue
+		}
+		if _, f, ok := ReadTargetMeta(full); ok {
+			t.Filter = copyFilter(f)
+		}
+	}
+	return nil
+}
+
+func (s *State) loadTargetsFromCSVDir() {
+	entries, err := os.ReadDir(s.csvDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		base := e.Name()
+		if !strings.HasSuffix(strings.ToLower(base), ".csv") {
+			continue
+		}
+		full := filepath.Join(s.csvDir, base)
+		metaName, metaFilter, hasMeta := ReadTargetMeta(full)
+		name := strings.TrimSuffix(base, ".csv")
+		if name == "" || !SafeFilename(name) || !SafeFilename(base) {
+			continue
+		}
+		if hasMeta && metaName != "" && SafeFilename(metaName) {
+			name = metaName
+		}
+		if _, ok := s.targets[name]; ok {
+			continue
+		}
+		filter := Filter{Resource: make(map[string]string), Attr: make(map[string]string)}
+		if hasMeta {
+			filter = copyFilter(metaFilter)
+		}
+		s.targets[name] = &Target{
+			Name:       name,
+			Filename:   base,
+			Filter:     filter,
+			Collecting: false,
+		}
+	}
+	s.saveTargetsUnlocked()
+}
+
+func (s *State) saveTargetsUnlocked() {
+	list := make([]Target, 0, len(s.targets))
+	for _, t := range s.targets {
+		list = append(list, Target{
+			Name:       t.Name,
+			Filename:   t.Filename,
+			Filter:     t.Filter,
+			Collecting: t.Collecting,
+		})
+	}
+	data, err := json.MarshalIndent(list, "", "\t")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(s.stateFilePath, data, 0644)
+}
+
+// SaveTargets 将当前 target 列表写回 stateFilePath。
+func (s *State) SaveTargets() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.saveTargetsUnlocked()
+	return nil
+}
+
+func filterEmpty(f Filter) bool {
+	return len(f.Metrics) == 0 && f.ScopeName == "" &&
+		len(f.Resource) == 0 && len(f.Attr) == 0
 }

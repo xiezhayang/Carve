@@ -212,3 +212,19 @@ func (p *Parsed) DebugLogRawPayload(sampleRows int, metricSubstr string) {
 		log.Printf("[carve] DEBUG_RAW no row with metric containing %q in this payload", metricSubstr)
 	}
 }
+
+// ResourceKeys 返回本批解析结果里出现过的 resource 键名（去重、排序），供 State 做“已知 resource key”列表
+func (p *Parsed) ResourceKeys() []string {
+	keys := make(map[string]struct{})
+	for _, r := range p.allRows {
+		for k := range r.Resource {
+			keys[k] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(keys))
+	for k := range keys {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}

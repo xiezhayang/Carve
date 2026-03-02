@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 LSTM training pod: fetch CSV from Carve, train, upload model.pt back to Carve.
+Uses ts for hour/dow cyclical features (value + hour_sin, hour_cos, dow_sin, dow_cos).
 Env: CARVE_URL, CSV_FILENAME, MODEL_NAME (optional).
 """
 
@@ -30,31 +31,51 @@ def main():
         print(f"fetch csv failed: {e}", file=sys.stderr)
         sys.exit(1)
 
-    df = pd.read_csv(io.StringIO(r.text))
+    df = pd.read_csv(io.StringIO(r.text), comment="#")
     if "value" not in df.columns:
         print("csv missing 'value' column", file=sys.stderr)
         sys.exit(1)
-
+    if "ts" not in df.columns:
+        print("csv missing 'ts' column", file=sys.stderr)
+        sys.exit(1)
+    df = df.sort_values("ts").reset_index(drop=True)
     values = df["value"].astype(float).ffill().values.reshape(-1, 1)
+
     if len(values) < 20:
         print("not enough rows for training", file=sys.stderr)
         sys.exit(1)
 
-    # 2) Build sequences (seq_len past -> next value)
+    # Parse ts (ms or s) -> hour & day-of-week for cyclical encoding
+    ts = df["ts"].values
+    if np.issubdtype(ts.dtype, np.number) and np.nanmax(ts) > 1e12:
+        t = pd.to_datetime(ts, unit="ms")
+    elif np.issubdtype(ts.dtype, np.number):
+        t = pd.to_datetime(ts, unit="s")
+    else:
+        t = pd.to_datetime(df["ts"])
+    hour = t.hour if hasattr(t, "hour") else t.dt.hour
+    dow = t.dayofweek if hasattr(t, "dayofweek") else t.dt.dayofweek
+    hour_sin = np.sin(2 * np.pi * np.asarray(hour, dtype=np.float32) / 24).reshape(-1, 1)
+    hour_cos = np.cos(2 * np.pi * np.asarray(hour, dtype=np.float32) / 24).reshape(-1, 1)
+    dow_sin = np.sin(2 * np.pi * np.asarray(dow, dtype=np.float32) / 7).reshape(-1, 1)
+    dow_cos = np.cos(2 * np.pi * np.asarray(dow, dtype=np.float32) / 7).reshape(-1, 1)
+
+    # 2) Build sequences: input = (value + time features), target = next value only
     seq_len = 10
     scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(values)
-    X = np.array([scaled[i : i + seq_len] for i in range(len(scaled) - seq_len)])
-    y = scaled[seq_len:]
+    scaled_value = scaler.fit_transform(values)
+    features = np.hstack([scaled_value, hour_sin, hour_cos, dow_sin, dow_cos])  # (n, 5)
+    X = np.array([features[i : i + seq_len] for i in range(len(features) - seq_len)], dtype=np.float32)
+    y = scaled_value[seq_len:]
 
     X = torch.tensor(X, dtype=torch.float32)
     y = torch.tensor(y, dtype=torch.float32)
     ds = TensorDataset(X, y)
     loader = DataLoader(ds, batch_size=32, shuffle=True)
 
-    # 3) Train
+    # 3) Train (input_size=5: value + hour_sin, hour_cos, dow_sin, dow_cos)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = LSTMPredictor(input_size=1, hidden_size=64, num_layers=1).to(device)
+    model = LSTMPredictor(input_size=5, hidden_size=64, num_layers=1).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     criterion = torch.nn.MSELoss()
     epochs = 30
@@ -82,6 +103,8 @@ def main():
             "state_dict": model.state_dict(),
             "scaler_min": scaler.data_min_.tolist(),
             "scaler_scale": scaler.scale_.tolist(),
+            "input_size": 5,
+            "seq_len": seq_len,
         },
         path,
     )

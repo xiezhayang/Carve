@@ -1,12 +1,15 @@
 package datamanager
 
 import (
+	"bufio"
 	"encoding/csv"
+	"encoding/json"
+	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -90,62 +93,137 @@ func RowToRecord(row Row, header []string) []string {
 	return out
 }
 
+// WriteTargetMeta 在创建新 CSV 时写第一行：# carve {"name":"...","filter":{...}}
+// 仅当文件不存在时写入。
+func WriteTargetMeta(path string, name string, filter Filter) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	line := struct {
+		Name   string `json:"name"`
+		Filter Filter `json:"filter"`
+	}{Name: name, Filter: filter}
+	data, err := json.Marshal(line)
+	if err != nil {
+		return err
+	}
+	_, err = f.WriteString("# carve ")
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(append(data, '\n'))
+	return err
+}
+
+// ReadTargetMeta 读 CSV 第一行，若为 # carve {...} 则解析并返回 name、filter，否则 ok==false。
+func ReadTargetMeta(path string) (name string, filter Filter, ok bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", Filter{}, false
+	}
+	defer f.Close()
+	br := bufio.NewReader(f)
+	line, _, err := br.ReadLine()
+	if err != nil || len(line) == 0 {
+		return "", Filter{}, false
+	}
+	s := strings.TrimSpace(string(line))
+	const prefix = "# carve "
+	if !strings.HasPrefix(s, prefix) {
+		return "", Filter{}, false
+	}
+	var meta struct {
+		Name   string  `json:"name"`
+		Filter *Filter `json:"filter"`
+	}
+	if json.Unmarshal([]byte(s[len(prefix):]), &meta) != nil || meta.Filter == nil {
+		return "", Filter{}, false
+	}
+	if meta.Filter.Resource == nil {
+		meta.Filter.Resource = make(map[string]string)
+	}
+	if meta.Filter.Attr == nil {
+		meta.Filter.Attr = make(map[string]string)
+	}
+	return meta.Name, *meta.Filter, true
+}
+
 // AppendRows 写入 rows；文件不存在时用 InferHeader 写表头，已存在时读首行作表头
 func AppendRows(fullPath string, rows []Row) (int, error) {
-	log.Printf("[carve] writer AppendRows fullPath=%s rows=%d", fullPath, len(rows))
 	if fullPath == "" || len(rows) == 0 {
-		log.Printf("[carve] writer AppendRows empty path or rows")
-		return 0, nil
+		return 0, errors.New("empty path or rows")
 	}
-	log.Printf("[carve] writer AppendRows path=%s rows=%d", fullPath, len(rows))
 	mu := lockForPath(fullPath)
 	mu.Lock()
 	defer mu.Unlock()
 	dir := filepath.Dir(fullPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		log.Printf("[carve] writer AppendRows mkdir error=%v", err)
 		return 0, err
 	}
 
 	var header []string
-	exist := false
+	needWriteHeader := false
 	if _, err := os.Stat(fullPath); err == nil {
-		exist = true
 		f, err := os.Open(fullPath)
 		if err != nil {
-			log.Printf("[carve] writer AppendRows open error=%v", err)
 			return 0, err
 		}
-		r := csv.NewReader(f)
-		rec, err := r.Read()
+		br := bufio.NewReader(f)
+		line1, _, err := br.ReadLine()
 		f.Close()
-		if err != nil || len(rec) == 0 {
+		if err != nil {
 			header = InferHeader(rows)
+			needWriteHeader = true
 		} else {
-			header = rec
+			first := strings.TrimSpace(string(line1))
+			if strings.HasPrefix(first, "# carve ") {
+				// 第一行是 meta，表头在第二行，需再读
+				f2, _ := os.Open(fullPath)
+				br2 := bufio.NewReader(f2)
+				_, _, _ = br2.ReadLine()
+				line2, _, _ := br2.ReadLine()
+				f2.Close()
+				if len(line2) > 0 {
+					rec, _ := csv.NewReader(strings.NewReader(string(line2))).Read()
+					header = rec
+				} else {
+					header = InferHeader(rows)
+					needWriteHeader = true
+				}
+			} else {
+				rec, _ := csv.NewReader(strings.NewReader(string(line1))).Read()
+				header = rec
+			}
+			if len(header) == 0 {
+				header = InferHeader(rows)
+				needWriteHeader = true
+			}
 		}
 	} else {
 		header = InferHeader(rows)
+		needWriteHeader = true
 	}
 
 	f, err := os.OpenFile(fullPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		log.Printf("[carve] writer AppendRows openfile error=%v", err)
 		return 0, err
 	}
 	defer f.Close()
 	w := csv.NewWriter(f)
-	if !exist {
+	if needWriteHeader {
 		err = w.Write(header)
 		if err != nil {
-			log.Printf("[carve] writer AppendRows write header error=%v", err)
 			return 0, err
 		}
 	}
 	for _, r := range rows {
 		err = w.Write(RowToRecord(r, header))
 		if err != nil {
-			log.Printf("[carve] writer AppendRows write row error=%v", err)
 			return 0, err
 		}
 	}

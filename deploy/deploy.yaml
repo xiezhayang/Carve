@@ -16,6 +16,7 @@ spec:
         app: otlp-server
         component: http-receiver
     spec:
+      serviceAccountName: carve
       volumes:
         - name: data
           persistentVolumeClaim:
@@ -32,6 +33,16 @@ spec:
           value: "8080"
         - name: CARVE_CSV_DIR
           value: "/data"
+        - name: CARVE_MODEL_DIR
+          value: "/data/models"
+        - name: CARVE_URL
+          value: "http://otlp-server:8080"
+        - name: CARVE_JOB_NAMESPACE
+          value: "default"
+        - name: CARVE_TRAINER_IMAGE
+          value: "carve-trainer:latest"
+        - name: CARVE_ALERTER_IMAGE
+          value: "carve-alerter:latest"
         - name: LOG_LEVEL
           value: "INFO"
         volumeMounts:

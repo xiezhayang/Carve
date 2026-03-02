@@ -23,6 +23,9 @@
 		},
 		{
 			"path": "../../rua/opentelemetry-go"
+		},
+		{
+			"path": "../../rua/locust"
 		}
 	],
 	"settings": {}
