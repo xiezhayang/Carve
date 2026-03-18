@@ -29,7 +29,10 @@ func (h *Handlers) CollectStart(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": err.Error()})
 		return
 	}
-	_ = h.State.SaveTargets()
+	if err := h.State.SaveTargets(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": err.Error()})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "message": "started", "name": name, "filename": filename})
 }
 

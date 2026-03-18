@@ -17,8 +17,8 @@ import (
 // Runner 根据配置创建训练 Job
 type Runner struct {
 	CarveURL     string
-	TrainerImage string
-	JobNamespace string
+	Image        string
+	Namespace    string
 	getClientset func() (kubernetes.Interface, error)
 }
 
@@ -39,7 +39,7 @@ func JobName(modelName string) string {
 }
 
 // NewRunner 使用 in-cluster 配置（Carve 跑在 K8s 里时用）
-func NewRunnerInCluster(carveURL, trainerImage, jobNamespace string) (*Runner, error) {
+func NewRunnerInCluster(carveURL, image, namespace string) (*Runner, error) {
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		return nil, err
@@ -50,8 +50,8 @@ func NewRunnerInCluster(carveURL, trainerImage, jobNamespace string) (*Runner, e
 	}
 	return &Runner{
 		CarveURL:     carveURL,
-		TrainerImage: trainerImage,
-		JobNamespace: jobNamespace,
+		Image:        image,
+		Namespace:    namespace,
 		getClientset: func() (kubernetes.Interface, error) { return cs, nil },
 	}, nil
 }
@@ -68,8 +68,8 @@ func NewRunnerFromKubeconfig(kubeconfig, carveURL, trainerImage, jobNamespace st
 	}
 	return &Runner{
 		CarveURL:     carveURL,
-		TrainerImage: trainerImage,
-		JobNamespace: jobNamespace,
+		Image:        trainerImage,
+		Namespace:    jobNamespace,
 		getClientset: func() (kubernetes.Interface, error) { return cs, nil },
 	}, nil
 }
@@ -86,7 +86,7 @@ func (r *Runner) Run(ctx context.Context, csvFilename, modelName string) error {
 	activeDeadline := int64(3600)
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: r.JobNamespace,
+			Namespace: r.Namespace,
 			Name:      jobName,
 		},
 		Spec: batchv1.JobSpec{
@@ -98,7 +98,7 @@ func (r *Runner) Run(ctx context.Context, csvFilename, modelName string) error {
 					Containers: []corev1.Container{
 						{
 							Name:  "trainer",
-							Image: r.TrainerImage,
+							Image: r.Image,
 							Env: []corev1.EnvVar{
 								{Name: "CARVE_URL", Value: r.CarveURL},
 								{Name: "CSV_FILENAME", Value: csvFilename},
@@ -110,7 +110,7 @@ func (r *Runner) Run(ctx context.Context, csvFilename, modelName string) error {
 			},
 		},
 	}
-	_, err = cs.BatchV1().Jobs(r.JobNamespace).Create(ctx, job, metav1.CreateOptions{})
+	_, err = cs.BatchV1().Jobs(r.Namespace).Create(ctx, job, metav1.CreateOptions{})
 	if err != nil {
 		return fmt.Errorf("create job: %w", err)
 	}
@@ -123,5 +123,5 @@ func (r *Runner) DeleteJob(ctx context.Context, jobName string) error {
 	if err != nil {
 		return err
 	}
-	return cs.BatchV1().Jobs(r.JobNamespace).Delete(ctx, jobName, metav1.DeleteOptions{})
+	return cs.BatchV1().Jobs(r.Namespace).Delete(ctx, jobName, metav1.DeleteOptions{})
 }

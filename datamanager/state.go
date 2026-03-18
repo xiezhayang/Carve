@@ -3,12 +3,15 @@ package datamanager
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"maps"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/xiezhayang/Carve/server/config"
 )
 
 var ErrInvalidFilename = fmt.Errorf("invalid filename")
@@ -24,26 +27,29 @@ type Filter struct {
 
 // Target 表示一路收集：Filter + 一个 CSV 文件；Path 由 AllTargets/ActiveTargets 填充，不持久化
 type Target struct {
-	Name       string
-	Filename   string
-	Path       string `json:"-"` // 仅返回用，不参与 JSON 持久化
-	Filter     Filter
-	Collecting bool
+	Name          string
+	CSVFilename   string
+	ModelFileName string
+	Path          string `json:"-"` // 仅返回用，不参与 JSON 持久化
+	Filter        Filter
+	Collecting    bool
+	Alerting      bool
 }
 
 type State struct {
 	mu                sync.RWMutex
 	targets           map[string]*Target
-	csvDir            string
-	stateFilePath     string
+	config            config.Config
+	targetFilePath    string
 	knownMetrics      map[string]struct{} // 从 OTLP 里发现过的指标名，供用户选择
 	knownResourceKeys map[string]struct{} // 从 OTLP 里发现过的 resource key，供用户选择
 }
 
-func NewState(csvDir string) *State {
+func NewState(config config.Config) *State {
 	return &State{
-		csvDir:            csvDir,
-		stateFilePath:     filepath.Join(csvDir, "state.json"),
+		mu:                sync.RWMutex{},
+		config:            config,
+		targetFilePath:    filepath.Join(config.CSVDir(), "targets.json"),
 		targets:           make(map[string]*Target),
 		knownMetrics:      make(map[string]struct{}),
 		knownResourceKeys: make(map[string]struct{}),
@@ -86,11 +92,18 @@ func (s *State) StartCollect(name, filename string, filter Filter) error {
 	defer s.mu.Unlock()
 	fcopy := copyFilter(filter)
 	if t, ok := s.targets[name]; ok {
-		t.Filename = filename
+		t.CSVFilename = filename
 		t.Filter = fcopy
 		t.Collecting = true
 	} else {
-		s.targets[name] = &Target{Name: name, Filename: filename, Filter: fcopy, Collecting: true}
+		s.targets[name] = &Target{
+			Name:          name,
+			CSVFilename:   filename,
+			Filter:        fcopy,
+			Collecting:    true,
+			Alerting:      false,
+			ModelFileName: "",
+		}
 	}
 	return nil
 }
@@ -135,15 +148,17 @@ func (s *State) ActiveTargets() []Target {
 	defer s.mu.RUnlock()
 	var out []Target
 	for _, t := range s.targets {
-		if !t.Collecting {
+		if !t.Collecting && !t.Alerting {
 			continue
 		}
 		out = append(out, Target{
-			Name:       t.Name,
-			Filename:   t.Filename,
-			Path:       filepath.Join(s.csvDir, t.Filename),
-			Filter:     copyFilter(t.Filter),
-			Collecting: t.Collecting,
+			Name:          t.Name,
+			CSVFilename:   t.CSVFilename,
+			ModelFileName: t.ModelFileName,
+			Path:          filepath.Join(s.config.CSVDir(), t.CSVFilename),
+			Filter:        copyFilter(t.Filter),
+			Collecting:    t.Collecting,
+			Alerting:      t.Alerting,
 		})
 	}
 	return out
@@ -156,11 +171,13 @@ func (s *State) AllTargets() []Target {
 	out := make([]Target, 0, len(s.targets))
 	for _, t := range s.targets {
 		out = append(out, Target{
-			Name:       t.Name,
-			Filename:   t.Filename,
-			Path:       filepath.Join(s.csvDir, t.Filename),
-			Filter:     copyFilter(t.Filter),
-			Collecting: t.Collecting,
+			Name:          t.Name,
+			CSVFilename:   t.CSVFilename,
+			ModelFileName: t.ModelFileName,
+			Path:          filepath.Join(s.config.CSVDir(), t.CSVFilename),
+			Filter:        copyFilter(t.Filter),
+			Collecting:    t.Collecting,
+			Alerting:      t.Alerting,
 		})
 	}
 	return out
@@ -208,10 +225,12 @@ func (s *State) DeleteTarget(name string) (existed bool) {
 	if name == "" {
 		existed = len(s.targets) > 0
 		s.targets = make(map[string]*Target)
+		s.saveTargetsUnlocked()
 		return existed
 	}
 	if _, ok := s.targets[name]; ok {
 		delete(s.targets, name)
+		s.saveTargetsUnlocked()
 		return true
 	}
 	return false
@@ -247,7 +266,7 @@ func (s *State) KnownResourceKeys() []string {
 func (s *State) LoadTargets() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	data, err := os.ReadFile(s.stateFilePath)
+	data, err := os.ReadFile(s.targetFilePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			s.loadTargetsFromCSVDir()
@@ -262,7 +281,7 @@ func (s *State) LoadTargets() error {
 	s.targets = make(map[string]*Target)
 	for i := range list {
 		t := &list[i]
-		if t.Name == "" || !SafeFilename(t.Name) || !SafeFilename(t.Filename) {
+		if t.Name == "" || !SafeFilename(t.Name) || !SafeFilename(t.CSVFilename) || !SafeFilename(t.ModelFileName) {
 			continue
 		}
 		if t.Filter.Resource == nil {
@@ -272,17 +291,19 @@ func (s *State) LoadTargets() error {
 			t.Filter.Attr = make(map[string]string)
 		}
 		s.targets[t.Name] = &Target{
-			Name:       t.Name,
-			Filename:   t.Filename,
-			Filter:     copyFilter(t.Filter),
-			Collecting: false,
+			Name:          t.Name,
+			CSVFilename:   t.CSVFilename,
+			ModelFileName: t.ModelFileName,
+			Filter:        copyFilter(t.Filter),
+			Collecting:    false,
+			Alerting:      false,
 		}
 	}
 	for _, t := range s.targets {
 		if !filterEmpty(t.Filter) {
 			continue
 		}
-		full := filepath.Join(s.csvDir, t.Filename)
+		full := filepath.Join(s.config.CSVDir(), t.CSVFilename)
 		if _, err := os.Stat(full); err != nil {
 			continue
 		}
@@ -294,7 +315,7 @@ func (s *State) LoadTargets() error {
 }
 
 func (s *State) loadTargetsFromCSVDir() {
-	entries, err := os.ReadDir(s.csvDir)
+	entries, err := os.ReadDir(s.config.CSVDir())
 	if err != nil {
 		return
 	}
@@ -306,7 +327,7 @@ func (s *State) loadTargetsFromCSVDir() {
 		if !strings.HasSuffix(strings.ToLower(base), ".csv") {
 			continue
 		}
-		full := filepath.Join(s.csvDir, base)
+		full := filepath.Join(s.config.CSVDir(), base)
 		metaName, metaFilter, hasMeta := ReadTargetMeta(full)
 		name := strings.TrimSuffix(base, ".csv")
 		if name == "" || !SafeFilename(name) || !SafeFilename(base) {
@@ -323,10 +344,11 @@ func (s *State) loadTargetsFromCSVDir() {
 			filter = copyFilter(metaFilter)
 		}
 		s.targets[name] = &Target{
-			Name:       name,
-			Filename:   base,
-			Filter:     filter,
-			Collecting: false,
+			Name:        name,
+			CSVFilename: base,
+			Filter:      filter,
+			Collecting:  false,
+			Alerting:    false,
 		}
 	}
 	s.saveTargetsUnlocked()
@@ -336,17 +358,20 @@ func (s *State) saveTargetsUnlocked() {
 	list := make([]Target, 0, len(s.targets))
 	for _, t := range s.targets {
 		list = append(list, Target{
-			Name:       t.Name,
-			Filename:   t.Filename,
-			Filter:     t.Filter,
-			Collecting: t.Collecting,
+			Name:          t.Name,
+			CSVFilename:   t.CSVFilename,
+			ModelFileName: t.ModelFileName,
+			Filter:        t.Filter,
+			Collecting:    t.Collecting,
+			Alerting:      t.Alerting,
 		})
 	}
 	data, err := json.MarshalIndent(list, "", "\t")
 	if err != nil {
+		log.Printf("[carve] saveTargetsUnlocked json.MarshalIndent error: %v", err)
 		return
 	}
-	_ = os.WriteFile(s.stateFilePath, data, 0644)
+	_ = os.WriteFile(s.targetFilePath, data, 0644)
 }
 
 // SaveTargets 将当前 target 列表写回 stateFilePath。
@@ -360,4 +385,16 @@ func (s *State) SaveTargets() error {
 func filterEmpty(f Filter) bool {
 	return len(f.Metrics) == 0 && f.ScopeName == "" &&
 		len(f.Resource) == 0 && len(f.Attr) == 0
+}
+
+func (s *State) SetAlerting(name string, on bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if t, ok := s.targets[name]; ok {
+		t.Alerting = on
+	}
 }

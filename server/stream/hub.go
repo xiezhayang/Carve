@@ -78,3 +78,12 @@ func (h *Hub) Broadcast(target string, rows []datamanager.Row) {
 		}
 	}
 }
+
+func (h *Hub) HasSubscribers(target string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if _, ok := h.conns[target]; !ok {
+		return false
+	}
+	return len(h.conns[target]) > 0
+}

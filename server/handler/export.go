@@ -97,7 +97,7 @@ func (h *Handlers) ExportDelete(c *gin.Context) {
 	}
 	// 移除指向该文件的 target，保持 state 一致
 	for _, t := range h.State.AllTargets() {
-		if t.Filename == filename {
+		if t.CSVFilename == filename {
 			h.State.DeleteTarget(t.Name)
 		}
 	}

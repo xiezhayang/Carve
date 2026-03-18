@@ -27,7 +27,7 @@ func (h *Handlers) TrainStart(c *gin.Context) {
 	var found bool
 	for _, t := range all {
 		if t.Name == target {
-			csvFilename = t.Filename
+			csvFilename = t.CSVFilename
 			found = true
 			break
 		}

@@ -65,31 +65,32 @@ func (h *Handlers) V1Metrics(c *gin.Context) {
 	for _, t := range targets {
 		stats := &otlp.FilterFailureStats{}
 		rows := parsed.RowsForFilterWithStats(t.Filter, stats)
-		if h.Writer == nil || len(rows) == 0 {
-			if len(rows) == 0 {
-				if stats.ParsedRows == 0 {
-					log.Printf("[carve] V1Metrics rows empty target=%s path=%s (no rows in request, parsed_rows=0)", t.Name, t.Path)
-				} else {
-					log.Printf("[carve] V1Metrics rows empty target=%s path=%s parsed=%d failed_metric=%d failed_resource=%d failed_scope=%d failed_attr=%d",
-						t.Name, t.Path, stats.ParsedRows, stats.FailedMetric, stats.FailedResource, stats.FailedScope, stats.FailedAttr)
-				}
+		if len(rows) == 0 {
+			if stats.ParsedRows == 0 {
+				log.Printf("[carve] V1Metrics rows empty target=%s path=%s (no rows in request, parsed_rows=0)", t.Name, t.Path)
+			} else {
+				log.Printf("[carve] V1Metrics rows empty target=%s path=%s parsed=%d failed_metric=%d failed_resource=%d failed_scope=%d failed_attr=%d",
+					t.Name, t.Path, stats.ParsedRows, stats.FailedMetric, stats.FailedResource, stats.FailedScope, stats.FailedAttr)
 			}
+
 			continue
 		}
-		if _, err := os.Stat(t.Path); os.IsNotExist(err) {
+		if _, err := os.Stat(t.Path); os.IsNotExist(err) && t.Collecting {
 			_ = datamanager.WriteTargetMeta(t.Path, t.Name, t.Filter)
 		}
 		wg.Add(1)
-		go func(path string, r []datamanager.Row, targetName string) {
+		go func(t datamanager.Target, r []datamanager.Row) {
 			defer wg.Done()
-			_, err := h.Writer(path, r)
-			if err != nil {
-				log.Printf("[carve] V1Metrics writer error=%v", err)
+			if t.Collecting {
+				_, err := h.Writer(t.Path, r)
+				if err != nil {
+					log.Printf("[carve] V1Metrics writer error=%v", err)
+				}
 			}
-			if h.Hub != nil {
-				h.Hub.Broadcast(targetName, r)
+			if t.Alerting && h.Hub != nil {
+				h.Hub.Broadcast(t.Name, r)
 			}
-		}(t.Path, rows, t.Name)
+		}(t, rows)
 	}
 	wg.Wait()
 	c.JSON(http.StatusOK, gin.H{

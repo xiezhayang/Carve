@@ -35,9 +35,13 @@ func (h *Handlers) AlertingStream(c *gin.Context) {
 	}
 	defer func() {
 		h.Hub.Unsubscribe(target, conn)
+		if !h.Hub.HasSubscribers(target) {
+			h.State.SetAlerting(target, false)
+		}
 	}()
 
 	h.Hub.Subscribe(target, conn)
+	h.State.SetAlerting(target, true)
 	// 读循环：客户端断开时 ReadMessage 会返回错误，然后 defer 退订
 	for {
 		if _, _, err := conn.ReadMessage(); err != nil {

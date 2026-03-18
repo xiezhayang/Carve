@@ -13,6 +13,8 @@ import (
 	"sync"
 )
 
+const prefix = "# carve "
+
 type Row struct {
 	TsMs      int64
 	Metric    string
@@ -112,7 +114,7 @@ func WriteTargetMeta(path string, name string, filter Filter) error {
 	if err != nil {
 		return err
 	}
-	_, err = f.WriteString("# carve ")
+	_, err = f.WriteString(prefix)
 	if err != nil {
 		return err
 	}
@@ -133,15 +135,14 @@ func ReadTargetMeta(path string) (name string, filter Filter, ok bool) {
 		return "", Filter{}, false
 	}
 	s := strings.TrimSpace(string(line))
-	const prefix = "# carve "
 	if !strings.HasPrefix(s, prefix) {
 		return "", Filter{}, false
 	}
 	var meta struct {
-		Name   string  `json:"name"`
-		Filter *Filter `json:"filter"`
+		Name   string `json:"name"`
+		Filter Filter `json:"filter"`
 	}
-	if json.Unmarshal([]byte(s[len(prefix):]), &meta) != nil || meta.Filter == nil {
+	if json.Unmarshal([]byte(s[len(prefix):]), &meta) != nil || filterEmpty(meta.Filter) {
 		return "", Filter{}, false
 	}
 	if meta.Filter.Resource == nil {
@@ -150,7 +151,7 @@ func ReadTargetMeta(path string) (name string, filter Filter, ok bool) {
 	if meta.Filter.Attr == nil {
 		meta.Filter.Attr = make(map[string]string)
 	}
-	return meta.Name, *meta.Filter, true
+	return meta.Name, meta.Filter, true
 }
 
 // AppendRows 写入 rows；文件不存在时用 InferHeader 写表头，已存在时读首行作表头

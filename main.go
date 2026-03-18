@@ -16,7 +16,7 @@ func main() {
 	cfg := config.Load()
 	_ = os.MkdirAll(cfg.CSVDir(), 0755)
 	_ = os.MkdirAll(cfg.ModelDir(), 0755)
-	state := datamanager.NewState(cfg.CSVDir())
+	state := datamanager.NewState(*cfg)
 	if err := state.LoadTargets(); err != nil {
 		log.Printf("[carve] LoadTargets: %v", err)
 	}
