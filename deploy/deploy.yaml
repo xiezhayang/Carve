@@ -23,7 +23,7 @@ spec:
             claimName: otlp-server-data
       containers:
       - name: otlp-server
-        image: local/otlp-server:1.0.0
+        image: carve:t1
         ports:
         - containerPort: 8080
           name: http
