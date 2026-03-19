@@ -1,13 +1,14 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: otlp-server
+  name: carve
+  namespace: carve
   labels:
-    app: otlp-server
+    app: carve
     component: http-receiver
 spec:
   selector:
-    app: otlp-server
+    app: carve
   ports:
   - port: 8080
     targetPort: 8080

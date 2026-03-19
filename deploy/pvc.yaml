@@ -1,9 +1,10 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: otlp-server-data
+  name: carve
   labels:
-    app: otlp-server
+    app: carve
+  namespace: carve
 spec:
   accessModes:
     - ReadWriteMany

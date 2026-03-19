@@ -1,28 +1,29 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: otlp-server
+  name: carve
+  namespace: carve
   labels:
-    app: otlp-server
+    app: carve
     component: http-receiver
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: otlp-server
+      app: carve
   template:
     metadata:
       labels:
-        app: otlp-server
+        app: carve
         component: http-receiver
     spec:
       serviceAccountName: carve
       volumes:
         - name: data
           persistentVolumeClaim:
-            claimName: otlp-server-data
+            claimName: carve
       containers:
-      - name: otlp-server
+      - name: carve
         image: carve:t1
         ports:
         - containerPort: 8080
@@ -36,9 +37,9 @@ spec:
         - name: CARVE_MODEL_DIR
           value: "/data/models"
         - name: CARVE_URL
-          value: "http://otlp-server:8080"
+          value: "http://carve:8080"
         - name: CARVE_JOB_NAMESPACE
-          value: "default"
+          value: "carve"
         - name: CARVE_TRAINER_IMAGE
           value: "carve-trainer:latest"
         - name: CARVE_ALERTER_IMAGE

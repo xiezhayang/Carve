@@ -5,13 +5,13 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: carve
-  namespace: default
+  namespace: carve
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: carve-job-and-alerter
-  namespace: default
+  namespace: carve
 rules:
   # 训练 Pod：创建、删除、查看 Job
   - apiGroups: ["batch"]
@@ -26,7 +26,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: carve-job-and-alerter
-  namespace: default
+  namespace: carve
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -34,4 +34,4 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: carve
-    namespace: default
+    namespace: carve
