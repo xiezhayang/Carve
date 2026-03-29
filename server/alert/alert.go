@@ -119,15 +119,23 @@ func (r *Runner) Deploy(ctx context.Context, target, modelName string) (deployme
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{"app": deploymentName},
+					Annotations: map[string]string{
+						"prometheus.io/scrape": "true",
+						"prometheus.io/port":   "9092",
+						"prometheus.io/path":   "/metrics",
+						"prometheus.io/scheme": "http",
+					},
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
-							Name:  "alerter",
-							Image: r.AlerterImage,
+							Name:            "alerter",
+							Image:           r.AlerterImage,
+							ImagePullPolicy: corev1.PullIfNotPresent,
 							Env: []corev1.EnvVar{
 								{Name: "CARVE_URL", Value: r.CarveURL},
 								{Name: "TARGET", Value: target},
+								{Name: "MODEL_NAME", Value: modelName},
 							},
 							Ports: []corev1.ContainerPort{{ContainerPort: 9092, Name: "metrics"}},
 						},

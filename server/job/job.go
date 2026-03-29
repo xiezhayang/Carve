@@ -97,8 +97,9 @@ func (r *Runner) Run(ctx context.Context, csvFilename, modelName string) error {
 					RestartPolicy: corev1.RestartPolicyNever,
 					Containers: []corev1.Container{
 						{
-							Name:  "trainer",
-							Image: r.Image,
+							Name:            "trainer",
+							Image:           r.Image,
+							ImagePullPolicy: corev1.PullIfNotPresent,
 							Env: []corev1.EnvVar{
 								{Name: "CARVE_URL", Value: r.CarveURL},
 								{Name: "CSV_FILENAME", Value: csvFilename},

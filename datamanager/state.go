@@ -264,6 +264,7 @@ func (s *State) KnownResourceKeys() []string {
 
 // LoadTargets 从 stateFilePath 恢复 target；文件不存在则扫描 csvDir 下已有 .csv 生成占位 target 并落盘。
 func (s *State) LoadTargets() error {
+	log.Printf("[carve] LoadTargets %s", s.targetFilePath)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	data, err := os.ReadFile(s.targetFilePath)
@@ -280,8 +281,10 @@ func (s *State) LoadTargets() error {
 	}
 	s.targets = make(map[string]*Target)
 	for i := range list {
+		log.Printf("[carve] LoadTargets %s", list[i].Name)
 		t := &list[i]
-		if t.Name == "" || !SafeFilename(t.Name) || !SafeFilename(t.CSVFilename) || !SafeFilename(t.ModelFileName) {
+		if t.Name == "" || !SafeFilename(t.Name) {
+			log.Printf("[carve] LoadTargets %s", t.Name)
 			continue
 		}
 		if t.Filter.Resource == nil {
@@ -311,6 +314,7 @@ func (s *State) LoadTargets() error {
 			t.Filter = copyFilter(f)
 		}
 	}
+	log.Printf("[carve] LoadTargets %d targets", len(s.targets))
 	return nil
 }
 

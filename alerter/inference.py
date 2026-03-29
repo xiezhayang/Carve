@@ -9,17 +9,15 @@ import torch
 from model import LSTMPredictor
 
 
-def _ts_to_hour_dow(ts_ms: int):
-    """ts_ms: milliseconds since epoch. Returns (hour_sin, hour_cos, dow_sin, dow_cos)."""
-    s = ts_ms / 1000.0
-    hour = int(s // 3600 % 24)
-    days_since_epoch = int(s // (3600 * 24))
-    dow = (days_since_epoch + 3) % 7  # 1970-01-01 是周四 -> 3，周一 -> 0
-    hour_sin = np.sin(2 * np.pi * hour / 24).astype(np.float32)
-    hour_cos = np.cos(2 * np.pi * hour / 24).astype(np.float32)
-    dow_sin = np.sin(2 * np.pi * dow / 7).astype(np.float32)
-    dow_cos = np.cos(2 * np.pi * dow / 7).astype(np.float32)
-    return hour_sin, hour_cos, dow_sin, dow_cos
+def _ts_to_minute_second_cyc(ts_ms: int):
+    """ts_ms (milliseconds) -> (min_sin, min_cos, sec_sin, sec_cos)."""
+    minute = int((ts_ms // 60000) % 60)
+    second = int((ts_ms // 1000) % 60)
+    min_sin = np.sin(2 * np.pi * minute / 60.0).astype(np.float32)
+    min_cos = np.cos(2 * np.pi * minute / 60.0).astype(np.float32)
+    sec_sin = np.sin(2 * np.pi * second / 60.0).astype(np.float32)
+    sec_cos = np.cos(2 * np.pi * second / 60.0).astype(np.float32)
+    return min_sin, min_cos, sec_sin, sec_cos
 
 
 def load_checkpoint(path: str):
@@ -73,8 +71,8 @@ class StreamInference:
         features = []
         for ts_ms, val in window:
             vs = self._scale_value(val)
-            h_s, h_c, d_s, d_c = _ts_to_hour_dow(ts_ms)
-            features.append([vs, h_s, h_c, d_s, d_c])
+            m_s, m_c, s_s, s_c = _ts_to_minute_second_cyc(ts_ms)
+            features.append([vs, m_s, m_c, s_s, s_c])
         arr = np.array(features, dtype=np.float32)
         inp = arr[: self.seq_len]  # (seq_len, 5)
         actual_next_raw = window[self.seq_len][1]

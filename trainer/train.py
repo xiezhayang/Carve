@@ -22,52 +22,62 @@ def main():
     base = os.environ.get("CARVE_URL", "http://carve:8080").rstrip("/")
     filename = os.environ.get("CSV_FILENAME", "metrics.csv")
     model_name = os.environ.get("MODEL_NAME", "lstm-default")
+    print(f"[trainer] start CARVE_URL={base} CSV_FILENAME={filename} MODEL_NAME={model_name}")
 
     # 1) Fetch CSV from Carve
     try:
+        url = f"{base}/export"
+        print(f"[trainer] downloading CSV: GET {url}?filename={filename}")
         r = requests.get(f"{base}/export", params={"filename": filename}, timeout=30)
         r.raise_for_status()
+        body_len = len(r.content)
+        print(f"[trainer] download ok status={r.status_code} size={body_len} bytes")
     except requests.RequestException as e:
         print(f"fetch csv failed: {e}", file=sys.stderr)
         sys.exit(1)
 
     df = pd.read_csv(io.StringIO(r.text), comment="#")
+    print(f"[trainer] csv parsed rows={len(df)} columns={list(df.columns)}")
     if "value" not in df.columns:
         print("csv missing 'value' column", file=sys.stderr)
         sys.exit(1)
     if "ts" not in df.columns:
         print("csv missing 'ts' column", file=sys.stderr)
         sys.exit(1)
-    df = df.sort_values("ts").reset_index(drop=True)
-    values = df["value"].astype(float).ffill().values.reshape(-1, 1)
 
+    # 只保留 ts/value，转数值，清理脏数据
+    df = df[["ts", "value"]].copy()
+    df["ts"] = pd.to_numeric(df["ts"], errors="coerce")
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    df = df.dropna(subset=["ts", "value"])
+
+    # 同一 ts 多行（不同 method/target）聚合为一个值，和告警侧保持一致
+    df["ts"] = df["ts"].astype(np.int64)
+    df = df.groupby("ts", as_index=False)["value"].sum().sort_values("ts").reset_index(drop=True)
+
+    values = df["value"].astype(np.float32).values.reshape(-1, 1)
     if len(values) < 20:
         print("not enough rows for training", file=sys.stderr)
         sys.exit(1)
 
-    # Parse ts (ms or s) -> hour & day-of-week for cyclical encoding
-    ts = df["ts"].values
-    if np.issubdtype(ts.dtype, np.number) and np.nanmax(ts) > 1e12:
-        t = pd.to_datetime(ts, unit="ms")
-    elif np.issubdtype(ts.dtype, np.number):
-        t = pd.to_datetime(ts, unit="s")
-    else:
-        t = pd.to_datetime(df["ts"])
-    hour = t.hour if hasattr(t, "hour") else t.dt.hour
-    dow = t.dayofweek if hasattr(t, "dayofweek") else t.dt.dayofweek
-    hour_sin = np.sin(2 * np.pi * np.asarray(hour, dtype=np.float32) / 24).reshape(-1, 1)
-    hour_cos = np.cos(2 * np.pi * np.asarray(hour, dtype=np.float32) / 24).reshape(-1, 1)
-    dow_sin = np.sin(2 * np.pi * np.asarray(dow, dtype=np.float32) / 7).reshape(-1, 1)
-    dow_cos = np.cos(2 * np.pi * np.asarray(dow, dtype=np.float32) / 7).reshape(-1, 1)
+    # ts(ms) -> minute/second cyclical features
+    ts_ms = df["ts"].to_numpy(dtype=np.int64)
+    minute = ((ts_ms // 60000) % 60).astype(np.float32).reshape(-1, 1)
+    second = ((ts_ms // 1000) % 60).astype(np.float32).reshape(-1, 1)
 
-    # 2) Build sequences: input = (value + time features), target = next value only
+    min_sin = np.sin(2 * np.pi * minute / 60.0).astype(np.float32)
+    min_cos = np.cos(2 * np.pi * minute / 60.0).astype(np.float32)
+    sec_sin = np.sin(2 * np.pi * second / 60.0).astype(np.float32)
+    sec_cos = np.cos(2 * np.pi * second / 60.0).astype(np.float32)
+
     seq_len = 10
     scaler = MinMaxScaler()
     scaled_value = scaler.fit_transform(values)
-    features = np.hstack([scaled_value, hour_sin, hour_cos, dow_sin, dow_cos])  # (n, 5)
+    features = np.hstack([scaled_value, min_sin, min_cos, sec_sin, sec_cos]).astype(np.float32)  # (n, 5)
     X = np.array([features[i : i + seq_len] for i in range(len(features) - seq_len)], dtype=np.float32)
     y = scaled_value[seq_len:]
-
+    n_seq = len(X)
+    print(f"[trainer] built sequences seq_len={seq_len} count={n_seq}")
     X = torch.tensor(X, dtype=torch.float32)
     y = torch.tensor(y, dtype=torch.float32)
     ds = TensorDataset(X, y)
@@ -108,8 +118,12 @@ def main():
         },
         path,
     )
+    size_bytes = os.path.getsize(path)
+    print(f"[trainer] saved model.pt size={size_bytes} bytes")
 
     try:
+        upload_url = f"{base}/model/upload"
+        print(f"[trainer] uploading to {upload_url} name={model_name}")
         with open(path, "rb") as f:
             resp = requests.post(
                 f"{base}/model/upload",
@@ -123,7 +137,7 @@ def main():
             print(f"upload returned {resp.status_code}: {resp.text[:200]}", file=sys.stderr)
     except requests.RequestException as e:
         print(f"upload failed (carve may not have /model/upload yet): {e}", file=sys.stderr)
-
+    print("[trainer] done")
     sys.exit(0)
 
 

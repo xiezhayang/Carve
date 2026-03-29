@@ -51,11 +51,12 @@ func Parse(raw []byte) (*Parsed, error) {
 			for k := 0; k < sm.Metrics().Len(); k++ {
 				m := sm.Metrics().At(k)
 				name := m.Name()
-				if name != "" {
-					seen[name] = struct{}{}
-				}
+
 				switch m.Type() {
 				case pmetric.MetricTypeGauge:
+					if name != "" {
+						seen[name] = struct{}{}
+					}
 					dps := m.Gauge().DataPoints()
 					for l := 0; l < dps.Len(); l++ {
 						dp := dps.At(l)
@@ -63,6 +64,9 @@ func Parse(raw []byte) (*Parsed, error) {
 						allRows = append(allRows, numberDPToRow(dp, name, resource, scopeName, attr))
 					}
 				case pmetric.MetricTypeSum:
+					if name != "" {
+						seen[name] = struct{}{}
+					}
 					dps := m.Sum().DataPoints()
 					for l := 0; l < dps.Len(); l++ {
 						dp := dps.At(l)

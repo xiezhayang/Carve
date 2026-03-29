@@ -20,6 +20,7 @@ func main() {
 	if err := state.LoadTargets(); err != nil {
 		log.Printf("[carve] LoadTargets: %v", err)
 	}
+	log.Printf("[carve] LoadTargets done, %d targets", len(state.AllTargets()))
 	writer := func(path string, rows []datamanager.Row) (int, error) {
 		return datamanager.AppendRows(path, rows)
 	}

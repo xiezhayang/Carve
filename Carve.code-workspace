@@ -26,6 +26,39 @@
 		},
 		{
 			"path": "../../rua/locust"
+		},
+		{
+			"path": "../../otel-demo-chart/opentelemetry-demo"
+		},
+		{
+			"path": "../../rua/k6"
+		},
+		{
+			"path": "../../rua/chaosblade-operator"
+		},
+		{
+			"path": "../../grafana"
+		},
+		{
+			"path": "../../rua/karma"
+		},
+		{
+			"path": "../../rua/chaosblade-box"
+		},
+		{
+			"path": "../../rua/backstage"
+		},
+		{
+			"path": "../../rua/ant-design"
+		},
+		{
+			"path": "../../rua/ant-design-pro"
+		},
+		{
+			"path": "../../rua/vue3-element-admin"
+		},
+		{
+			"path": "../../rua/promql-anomaly-detection"
 		}
 	],
 	"settings": {}

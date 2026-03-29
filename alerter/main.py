@@ -81,18 +81,22 @@ def main():
             print("websocket connected")
             while True:
                 raw = ws.recv()
+                print(f"[alerter] ws recv len={len(raw)}", flush=True)
                 rows = json.loads(raw)
+                n = len(rows) if isinstance(rows, list) else -1
+                print(f"[alerter] parsed rows={n}", flush=True)
                 if not rows:
                     continue
                 # Sort by ts; use (ts, value) as series; same ts -> keep first value
-                seen_ts = set()
+                bucket = {}
                 for r in rows:
-                    ts_ms = r.get("ts") or 0
+                    ts_ms = int(r.get("ts") or 0)
                     value = float(r.get("value", 0))
-                    if ts_ms in seen_ts:
-                        continue
-                    seen_ts.add(ts_ms)
-                    infer.push(ts_ms, value)
+                    bucket[ts_ms] = bucket.get(ts_ms, 0.0) + value
+
+                for ts_ms in sorted(bucket.keys()):
+                    infer.push(ts_ms, bucket[ts_ms])
+
                 err, reason = infer.step()
                 if err is not None:
                     PREDICTION_ERROR.labels(target=target, model=display_model).set(err)
@@ -101,3 +105,6 @@ def main():
             print(f"ws error: {e}", file=sys.stderr)
             time.sleep(backoff)
             backoff = min(backoff * 2, max_backoff)
+
+if __name__ == "__main__":
+    main()

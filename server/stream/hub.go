@@ -63,9 +63,10 @@ func (h *Hub) Broadcast(target string, rows []datamanager.Row) {
 		log.Printf("[stream] marshal error: %v", err)
 		return
 	}
-
+	log.Printf("[stream] broadcast target=%s rows=%d bytes=%d", target, len(rows), len(body))
 	h.mu.RLock()
 	conns := make([]*websocket.Conn, 0, len(h.conns[target]))
+	log.Printf("[stream] broadcast target=%s subscribers=%d", target, len(conns))
 	for c := range h.conns[target] {
 		conns = append(conns, c)
 	}
