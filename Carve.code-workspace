@@ -59,6 +59,9 @@
 		},
 		{
 			"path": "../../rua/promql-anomaly-detection"
+		},
+		{
+			"path": "../Daniels"
 		}
 	],
 	"settings": {}
